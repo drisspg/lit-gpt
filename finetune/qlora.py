@@ -61,17 +61,17 @@ def swap_for_qlora_jank(model: torch.nn.Module, qlora_config: QloraConfig) -> No
     print("Swapping for Qlora...")
     for module in tqdm(model.transformer.h):
         current_mlp = module.mlp
-        w1 = current_mlp.fc_1.weight
-        w2 = current_mlp.fc_2.weight
-        w3 = current_mlp.proj.weight
-        new_mod = QloraMLP(w1.to(torch.bfloat16), w2.to(torch.bfloat16), w3.to(torch.bfloat16), qlora_config)
+        w1 = current_mlp.fc_1.weight.to(dtype=torch.bfloat16, device=device)
+        w2 = current_mlp.fc_2.weight.to(dtype=torch.bfloat16, device=device)
+        w3 = current_mlp.proj.weight.to(dtype=torch.bfloat16, device=device)
+        new_mod = QloraMLP(w1, w2, w3, qlora_config)
         module.mlp = new_mod
         del current_mlp
 
 
 def main(
     data_dir: Path = Path("data/alpaca"), 
-    checkpoint_dir: Path = Path("checkpoints/meta-llama/Llama-2-13b-hf"),
+    checkpoint_dir: Path = Path("checkpoints/meta-llama/Llama-2-70b-hf"),
     out_dir: Path = ("out/lora/alpaca"),
     compile: bool = False,
     process_on_device: bool = False, # This will convert to NF4 on device but not save you from peak gpu memory
