@@ -12,6 +12,7 @@ from transformer_nuggets.quant import linear_nf4
 import torch
 import torch.nn as nn
 import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from lightning_utilities.core.imports import RequirementCache
 from typing_extensions import Self
 
@@ -104,7 +105,10 @@ class GPT(nn.Module):
 
         if not use_kv_cache:
             for block in self.transformer.h:
-                x, *_ = block(x, (cos, sin), max_seq_length)
+                if self.config.checkpoint_transformer_blocks:
+                    x, *_ = checkpoint(block, x, (cos, sin), max_seq_length, use_reentrant=False)
+                else:
+                    x, *_ = block(x, (cos, sin), max_seq_length)
         else:
             self.kv_caches = self.kv_caches or self.build_kv_caches(x, max_seq_length, cos.size(-1))
             for i, block in enumerate(self.transformer.h):

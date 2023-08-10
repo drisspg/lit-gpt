@@ -28,7 +28,6 @@ from lit_gpt.tokenizer import Tokenizer
 from lit_gpt.utils import chunked_cross_entropy
 from scripts.prepare_alpaca import generate_prompt
 
-from transformer_nuggets.utils import save_memory_snapshot
 
 
 instruction_tuning = True
@@ -37,7 +36,7 @@ save_interval = 10000
 eval_iters = 100
 log_interval = 1
 # change this value to force a maximum sequence length
-override_max_seq_length = 5
+override_max_seq_length = None
 
 # Hyperparameters
 learning_rate = 3e-4
@@ -90,6 +89,10 @@ def main(
     )
 
     checkpoint_path = checkpoint_dir / "lit_model.pth"
+    if "70b" in str(checkpoint_dir):
+        micro_batch_size = 1
+        config.checkpoint_transformer_blocks = True
+        print(f"Finetuning on 70b model, setting micro_batch_size to {micro_batch_size}")
 
     print("Loading model...")
     map_location = device if process_on_device else None
@@ -199,7 +202,7 @@ def validate(model: GPT, val_data: List[Dict], tokenizer: Tokenizer, longest_seq
     print("Validating ...")
     model.eval()
     losses = torch.zeros(eval_iters)
-    for k in range(eval_iters):
+    for k in tqdm(range(eval_iters)):
         input_ids, targets = get_batch(val_data, longest_seq_length)
         logits = model(input_ids)
         loss = chunked_cross_entropy(logits, targets, chunk_size=0)

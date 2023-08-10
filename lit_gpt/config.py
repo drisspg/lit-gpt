@@ -49,6 +49,7 @@ class Config:
     _mlp_class: Literal["GptNeoxMLP", "LLaMAMLP"] = "GptNeoxMLP"
     intermediate_size: Optional[int] = None
     condense_ratio: int = 1
+    checkpoint_transformer_blocks: bool = False
 
     def __post_init__(self):
         # error checking
