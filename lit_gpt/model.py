@@ -5,9 +5,14 @@ https://github.com/EleutherAI/gpt-neox/tree/main/megatron/model.
 """
 import math
 from typing import List, Optional, Tuple, Any
+from dataclasses import dataclass
+import transformer_nuggets.quant.qlora as qlora
+from transformer_nuggets.quant import linear_nf4
 
 import torch
 import torch.nn as nn
+import torch.nn.functional as F
+from torch.utils.checkpoint import checkpoint
 from lightning_utilities.core.imports import RequirementCache
 from typing_extensions import Self
 
@@ -100,7 +105,10 @@ class GPT(nn.Module):
 
         if not use_kv_cache:
             for block in self.transformer.h:
-                x, *_ = block(x, (cos, sin), max_seq_length)
+                if self.config.checkpoint_transformer_blocks:
+                    x, *_ = checkpoint(block, x, (cos, sin), max_seq_length, use_reentrant=False)
+                else:
+                    x, *_ = block(x, (cos, sin), max_seq_length)
         else:
             self.kv_caches = self.kv_caches or self.build_kv_caches(x, max_seq_length, cos.size(-1))
             for i, block in enumerate(self.transformer.h):
@@ -274,6 +282,36 @@ class CausalSelfAttention(nn.Module):
             q, k, v, attn_mask=mask, dropout_p=0.0, scale=scale, is_causal=mask is None
         )
 
+@dataclass
+class QloraConfig:
+    r: int = 2
+    lora_alpha: int = 1
+    lora_dropout: float = 0.0
+
+class QloraMLP(nn.Module):
+    # This very notably doesn't save on backward compute
+    def __init__(self, weight1: torch.Tensor, weight2: torch.Tensor, weight3: torch.Tensor, QloraConfig: QloraConfig = None) -> None:
+        super().__init__()
+        if QloraConfig is None:
+            QloraConfig = QloraConfig()
+
+        r = QloraConfig.r
+        lora_alpha = QloraConfig.lora_alpha
+        lora_dropout = QloraConfig.lora_dropout
+
+        self.qlora_w1 = qlora.QloraLinear(weight1.shape[1], weight1.shape[0], weight1, r, lora_alpha, lora_dropout)
+        self.qlora_w2 = qlora.QloraLinear(weight2.shape[1], weight2.shape[0], weight2, r, lora_alpha, lora_dropout)
+        self.qlora_w3 = qlora.QloraLinear(weight3.shape[1], weight3.shape[0], weight3, r, lora_alpha, lora_dropout)
+
+    def forward(self, x: torch.Tensor) -> torch.Tensor:
+        x = F.silu(self.qlora_w1(x)) * self.qlora_w2(x)
+        x = self.qlora_w3(x)
+        return x
+    
+    @classmethod
+    def from_config(cls, config: Config) -> "QloraMLP":
+        weight1, weight2, weight3 = qlora.get_mlp_weights(config.n_embd)
+        return cls(weight1, weight2, weight3)
 
 class GptNeoxMLP(nn.Module):
     def __init__(self, config: Config) -> None:

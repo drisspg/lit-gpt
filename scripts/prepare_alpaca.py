@@ -17,11 +17,12 @@ from lit_gpt.tokenizer import Tokenizer
 DATA_FILE_URL = "https://raw.githubusercontent.com/tloen/alpaca-lora/main/alpaca_data_cleaned_archive.json"
 DATA_FILE_NAME = "alpaca_data_cleaned_archive.json"
 DESTINATION_PATH = Path("data/alpaca")
-CHECKPOINT_DIR = Path("checkpoints/stabilityai/stablelm-base-alpha-3b")
+CHECKPOINT_DIR = Path("checkpoints/meta-llama/Llama-2-13b-hf")
 TEST_SPLIT_FRACTION = 0.03865  # to get exactly 2000 test samples
 IGNORE_INDEX = -1
 MASK_INPUTS = False  # as in alpaca-lora
 SEED = 42
+MAX_SEQ_LEN = 1024
 
 
 def prepare(
@@ -42,7 +43,7 @@ def prepare(
     with open(checkpoint_dir / "lit_config.json", "r") as file:
         config = json.load(file)
         max_seq_length = config["block_size"]
-
+    max_seq_length = MAX_SEQ_LEN
     destination_path.mkdir(parents=True, exist_ok=True)
     data_file_path = destination_path / data_file_name
     print("Loading data file...")
