@@ -27,11 +27,17 @@ from lit_gpt.utils import (
 )
 from scripts.prepare_alpaca import generate_prompt
 
-eval_interval = 600
+# Float8 imports
+from float8_experimental.float8_linear import swap_linear_with_float8_linear, sync_float8_amax_and_scale_history
+
+# We want to skip the first embedding layer since scaled_mm needs to multiple of 16
+float8_skip_list = ["lm_head"]
+
+eval_interval = 100
 save_interval = 1000
 eval_iters = 100
 eval_max_new_tokens = 100
-log_interval = 1
+log_interval = 16
 devices = 1
 # change this value to force a maximum sequence length
 override_max_seq_length = None
@@ -56,6 +62,7 @@ def setup(
     checkpoint_dir: Path = Path("checkpoints/stabilityai/stablelm-base-alpha-3b"),
     out_dir: Path = Path("out/full/alpaca"),
     precision: Optional[str] = None,
+    use_fp8: bool = False,
 ):
     precision = precision or get_default_supported_precision(training=True)
 
@@ -74,10 +81,10 @@ def setup(
     logger = step_csv_logger(out_dir.parent, out_dir.name, flush_logs_every_n_steps=log_interval)
     fabric = L.Fabric(devices=fabric_devices, strategy=strategy, precision=precision, loggers=logger)
     fabric.print(hparams)
-    fabric.launch(main, data_dir, checkpoint_dir, out_dir)
+    fabric.launch(main, data_dir, checkpoint_dir, out_dir, use_fp8)
 
 
-def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path):
+def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path, use_fp8: bool):
     check_valid_checkpoint_dir(checkpoint_dir)
 
     speed_monitor = SpeedMonitor(fabric, window_size=50, time_unit="seconds")
@@ -103,11 +110,13 @@ def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path):
     optimizer = fabric.setup_optimizers(optimizer)
 
     load_checkpoint(fabric, model, checkpoint_path)
-
+    model = model.to(torch.bfloat16)
+    if use_fp8:
+        swap_linear_with_float8_linear(model, float8_skip_list)
     fabric.seed_everything(1337 + fabric.global_rank)
 
     train_time = time.perf_counter()
-    train(fabric, model, optimizer, train_data, val_data, checkpoint_dir, out_dir, speed_monitor)
+    train(fabric, model, optimizer, train_data, val_data, checkpoint_dir, out_dir, speed_monitor, use_fp8)
     fabric.print(f"Training time: {(time.perf_counter()-train_time):.2f}s")
     if fabric.device.type == "cuda":
         fabric.print(f"Memory used: {torch.cuda.max_memory_allocated() / 1e9:.02f} GB")
@@ -126,6 +135,7 @@ def train(
     checkpoint_dir: Path,
     out_dir: Path,
     speed_monitor: SpeedMonitor,
+    use_fp8: bool,
 ) -> None:
     tokenizer = Tokenizer(checkpoint_dir)
     max_seq_length, longest_seq_length, longest_seq_ix = get_max_seq_length(train_data)
@@ -163,6 +173,9 @@ def train(
         input_ids, targets = get_batch(
             fabric, train_data, longest_seq_length, longest_seq_ix if iter_num == 0 else None
         )
+        # Determine if this is correct location
+        if use_fp8:
+            sync_float8_amax_and_scale_history(model)
 
         is_accumulating = (iter_num + 1) % gradient_accumulation_iters != 0
         with fabric.no_backward_sync(model, enabled=is_accumulating):
@@ -270,6 +283,7 @@ def get_max_seq_length(data: List[Dict]) -> Tuple[int, int, int]:
     max_seq_length = max(lengths)
     longest_seq_ix = lengths.index(max_seq_length)
     # support easy override at the top of the file
+    print(f"Using a max sequence length of {max_seq_length}")
     return (
         override_max_seq_length if isinstance(override_max_seq_length, int) else max_seq_length,
         max_seq_length,

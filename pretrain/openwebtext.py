@@ -20,7 +20,7 @@ from lit_gpt.speed_monitor import SpeedMonitorFabric as SpeedMonitor
 from lit_gpt.speed_monitor import estimate_flops, measure_flops
 from lit_gpt.utils import chunked_cross_entropy, get_default_supported_precision, num_parameters, step_csv_logger
 
-model_name = "pythia-70m"
+model_name = "Llama-2-7b-hf"
 name = "openwebtext"
 out_dir = Path("out") / name
 data_dir = Path("data") / name
@@ -92,8 +92,8 @@ def main(fabric, resume) -> None:
     )
     optimizer = fabric.setup_optimizers(optimizer)
 
-    train_data, val_data = load_datasets(data_dir, max_seq_length=model.max_seq_length)
-    train_dataloader = DataLoader(train_data, batch_size=micro_batch_size, num_workers=2)
+    train_data, val_data = load_datasets(data_dir)
+    train_dataloader = DataLoader(train_data, batch_size=micro_batch_size, num_workers =2)
     val_dataloader = DataLoader(val_data, batch_size=micro_batch_size, num_workers=2)
     train_dataloader, val_dataloader = fabric.setup_dataloaders(train_dataloader, val_dataloader)
 
