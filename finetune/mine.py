@@ -15,6 +15,7 @@ import numpy as np
 import torch
 from tqdm import tqdm
 import random
+from contextlib import nullcontext
 
 # support running without installing as a package
 wd = Path(__file__).parent.parent.resolve()
@@ -60,6 +61,34 @@ from float8_experimental.float8_linear_nots import swap_linear_with_float8_linea
 
 # We want to skip the first embedding layer since scaled_mm needs to multiple of 16
 float8_skip_list = ["lm_head"]
+USE_TS = False
+
+def get_profile_context(profile: bool, use_fp8: bool):
+    def trace_handler(prof):
+        fp8_str = "fp8_TS" if USE_TS else "fp8_NoTS"
+        dtype_str = fp8_str if use_fp8 else "bf16"
+        output_str = f"/tmp/trace_llama_7b_hf_{dtype_str}.json"
+        prof.export_chrome_trace(output_str)
+        print(f"Wrote profile to: {output_str}")
+    if profile:
+        context = torch.profiler.profile(
+        activities=[
+            torch.profiler.ProfilerActivity.CPU,
+            torch.profiler.ProfilerActivity.CUDA,
+        ],
+        schedule=torch.profiler.schedule(
+            wait=100,
+            warmup=1,
+            active=5,
+            repeat=1),
+        record_shapes=True,
+        with_stack=True,
+        on_trace_ready=trace_handler
+        )
+        return context
+    else:
+        return nullcontext
+
 
 def main(
     data_dir: Path = Path("data/alpaca"),
@@ -67,6 +96,7 @@ def main(
     out_dir: Path = ("out/full/alpaca"),
     compile: bool = False,
     use_fp8: bool = False,
+    profile: bool = False, # this will profile iterations 100-105
 ):
     random.seed(1337)
     np.random.seed(1337)
@@ -90,8 +120,10 @@ def main(
     model.load_state_dict(checkpoint, strict=True, assign=True)
     model.to(device=device)
     if use_fp8:
-        swap_linear_with_float8_linear(model, skip_fqn_list=float8_skip_list)
-        # swap_linear_with_float8_linear_nots(model, skip_fqn_list=float8_skip_list)
+        if USE_TS:
+            swap_linear_with_float8_linear(model)
+        else:
+            swap_linear_with_float8_linear_nots(model)
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     num_trainable = sum(p.numel() for p in trainable_params)
     print(f"The number of trainable parameters: {num_trainable:,}")
@@ -100,7 +132,7 @@ def main(
     if compile:
         model = torch.compile(model)
 
-    train(model, optimizer, train_data, val_data, checkpoint_dir, out_dir, use_fp8)
+    train(model, optimizer, train_data, val_data, checkpoint_dir, out_dir, use_fp8, profile)
 
     # Save the final LoRA checkpoint at the end of training
     save_path = out_dir / "lit_model_full_finetuned.pth"
@@ -114,6 +146,7 @@ def train(
     checkpoint_dir: Path,
     out_dir: str,
     use_fp8: bool,
+    profile: bool,
 ) -> None:
     """The training loop.
 
@@ -122,59 +155,63 @@ def train(
     tokenizer = Tokenizer(checkpoint_dir)
     max_seq_length, longest_seq_length, longest_seq_ix = get_max_seq_length(train_data)
     model.max_seq_length = max_seq_length
-    val_loss = validate(model, val_data, tokenizer, longest_seq_length)
-    print(f"step {0}: val loss {val_loss:.4f}")
+    # val_loss = validate(model, val_data, tokenizer, longest_seq_length)
+    # print(f"step {0}: val loss {val_loss:.4f}")
     step_count = 0
     total_lengths = 0
     progress_bar = tqdm(total=max_iters)
 
     model.train()
-    for iter_num in range(max_iters):
-        # Determine if this is correct location
-        if use_fp8:
-            sync_float8_amax_and_scale_history(model)
+    profile_context = get_profile_context(profile, use_fp8)
+    with profile_context as p:
+        for iter_num in range(max_iters):
+            # Determine if this is correct location
+            if use_fp8:
+                sync_float8_amax_and_scale_history(model)
 
-        if step_count <= warmup_steps:
-            # linear warmup
-            lr = learning_rate * step_count / warmup_steps
-            for param_group in optimizer.param_groups:
-                param_group['lr'] = lr
+            if step_count <= warmup_steps:
+                # linear warmup
+                lr = learning_rate * step_count / warmup_steps
+                for param_group in optimizer.param_groups:
+                    param_group['lr'] = lr
 
-        t0 = time.perf_counter()
+            t0 = time.perf_counter()
 
-        input_ids, targets = get_batch(train_data, longest_seq_ix if iter_num == 0 else None)
-        is_accumulating = (iter_num + 1) % gradient_accumulation_iters != 0
+            input_ids, targets = get_batch(train_data, longest_seq_ix if iter_num == 0 else None)
+            is_accumulating = (iter_num + 1) % gradient_accumulation_iters != 0
 
-        with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
-            logits = model(input_ids)
+            with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
+                logits = model(input_ids)
 
-        # logits[-1] = logits[-1][..., :-1, :]
-        # loss = chunked_cross_entropy(logits, targets[..., 1:])
-        loss = loss_fn(logits, targets)
-        # Scale the loss by grad_accumulation iters
-        (loss/gradient_accumulation_iters).backward()
+            # logits[-1] = logits[-1][..., :-1, :]
+            # loss = chunked_cross_entropy(logits, targets[..., 1:])
+            loss = loss_fn(logits, targets)
+            # Scale the loss by grad_accumulation iters
+            (loss/gradient_accumulation_iters).backward()
 
-        if not is_accumulating:
-            optimizer.step()
-            optimizer.zero_grad()
-            step_count += 1
-        dt = time.perf_counter() - t0
-        total_lengths += input_ids.size(1)
+            if not is_accumulating:
+                optimizer.step()
+                optimizer.zero_grad()
+                step_count += 1
+            dt = time.perf_counter() - t0
+            total_lengths += input_ids.size(1)
 
-        if not is_accumulating and step_count % eval_interval == 0:
-            t0 = time.time()
-            val_loss = validate(model, val_data, tokenizer, longest_seq_length)
-            t1 = time.time() - t0
-            print(f"step {iter_num}: val loss {val_loss:.4f}, val time: {t1 * 1000:.2f}ms")
+            if not is_accumulating and step_count % eval_interval == 0:
+                t0 = time.time()
+                val_loss = validate(model, val_data, tokenizer, longest_seq_length)
+                t1 = time.time() - t0
+                print(f"step {iter_num}: val loss {val_loss:.4f}, val time: {t1 * 1000:.2f}ms")
 
 
-        if not is_accumulating and step_count % save_interval == 0:
-            checkpoint_path = out_dir / f"iter-{iter_num:06d}-ckpt.pth"
-            torch.save(checkpoint_path, {"model": model})
+            if not is_accumulating and step_count % save_interval == 0:
+                checkpoint_path = out_dir / f"iter-{iter_num:06d}-ckpt.pth"
+                torch.save(checkpoint_path, {"model": model})
 
-        if iter_num % log_interval == 0:
-            progress_bar.set_postfix_str(f"Iter {iter_num}: Loss {loss.item():.4f}, Time: {dt*1000:.2f}ms")
-        progress_bar.update(1)
+            if iter_num % log_interval == 0:
+                progress_bar.set_postfix_str(f"Iter {iter_num}: Loss {loss.item():.4f}, Time: {dt*1000:.2f}ms")
+            progress_bar.update(1)
+            if profile:
+                p.step()
 
 def loss_fn(logits, targets):
     # shift the targets such that output n predicts token n+1
