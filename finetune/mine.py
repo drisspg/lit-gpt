@@ -79,7 +79,7 @@ def get_profile_context(profile: bool, use_fp8: bool):
         schedule=torch.profiler.schedule(
             wait=100,
             warmup=1,
-            active=5,
+            active=2,
             repeat=1),
         record_shapes=True,
         with_stack=True,
