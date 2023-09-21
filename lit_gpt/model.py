@@ -43,19 +43,20 @@ class GPT(nn.Module):
         When doing inference, the sequences used might be shorter than the model's context length.
         This allows setting a smaller number to avoid allocating unused memory
         """
-        if value > self.config.block_size:
-            raise ValueError(f"Cannot attend to {value}, block size is only {self.config.block_size}")
-        self._max_seq_length = value
-        if not hasattr(self, "cos"):
-            # first call
-            cos, sin = self.rope_cache()
-            self.register_buffer("cos", cos, persistent=False)
-            self.register_buffer("sin", sin, persistent=False)
-        elif value != self.cos.size(0):
-            # override
-            self.cos, self.sin = self.rope_cache(device=self.cos.device)
-        # the mask and kv cache size will get updated on `set_kv_cache`. we cannot update it here because we don't know
-        # if the kv cache is expected
+        with torch.device("cuda"):
+            if value > self.config.block_size:
+                raise ValueError(f"Cannot attend to {value}, block size is only {self.config.block_size}")
+            self._max_seq_length = value
+            if not hasattr(self, "cos"):
+                # first call
+                cos, sin = self.rope_cache()
+                self.register_buffer("cos", cos, persistent=False)
+                self.register_buffer("sin", sin, persistent=False)
+            elif value != self.cos.size(0):
+                # override
+                self.cos, self.sin = self.rope_cache(device=self.cos.device)
+            # the mask and kv cache size will get updated on `set_kv_cache`. we cannot update it here because we don't know
+            # if the kv cache is expected
 
     def reset_parameters(self) -> None:
         # Trigger resetting the rope-cache

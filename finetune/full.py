@@ -101,8 +101,8 @@ def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path, 
     checkpoint_path = checkpoint_dir / "lit_model.pth"
     fabric.print(f"Loading model {str(checkpoint_path)!r} with {config.__dict__}")
     with fabric.init_module(empty_init=(devices > 1)):
+        # model = GPT(config).to(torch.bfloat16)
         model = GPT(config)
-
     fabric.print(f"Number of trainable parameters: {num_parameters(model, requires_grad=True):,}")
 
     model = fabric.setup_module(model)
@@ -110,7 +110,7 @@ def main(fabric: L.Fabric, data_dir: Path, checkpoint_dir: Path, out_dir: Path, 
     optimizer = fabric.setup_optimizers(optimizer)
 
     load_checkpoint(fabric, model, checkpoint_path)
-    model = model.to(torch.bfloat16)
+    # model = model.to(torch.bfloat16)
     if use_fp8:
         swap_linear_with_float8_linear(model, float8_skip_list)
     fabric.seed_everything(1337 + fabric.global_rank)
