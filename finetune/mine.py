@@ -217,6 +217,8 @@ def validate(model: GPT, val_data: List[Dict], tokenizer: Tokenizer, longest_seq
     model.train()
     return val_loss.item()
 
+def get_nearest_multiple_of_16_less(x):
+    return (x // 16) * 16
 
 def get_batch(data: List[Dict], longest_seq_ix: Optional[int] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
@@ -231,13 +233,14 @@ def get_batch(data: List[Dict], longest_seq_ix: Optional[int] = None
     # it's better to pad to a fixed seq length with XLA to avoid recompilation
     max_len = max(len(s) for s in input_ids)
 
+    new_len = get_nearest_multiple_of_16_less(max_len)
     def pad_right(x, pad_id):
         # pad right based on the longest sequence
-        n = max_len - len(x)
+        n = new_len - len(x)
         return torch.cat((x, torch.full((n,), pad_id, dtype=x.dtype)))
 
-    x = torch.stack([pad_right(x, pad_id=0) for x in input_ids])
-    y = torch.stack([pad_right(x, pad_id=-1) for x in labels])
+    x = torch.stack([pad_right(x[:new_len], pad_id=0) for x in input_ids])
+    y = torch.stack([pad_right(x[:new_len], pad_id=-1) for x in labels])
     x, y = x.pin_memory().to(device), y.pin_memory().to(device)
     return x, y
 
