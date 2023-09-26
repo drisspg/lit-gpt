@@ -27,7 +27,7 @@ from lit_gpt.model import GPT, Config
 from lit_gpt.tokenizer import Tokenizer
 from lit_gpt.utils import chunked_cross_entropy
 from scripts.prepare_alpaca import generate_prompt
-
+import csv
 
 
 instruction_tuning = True
@@ -64,7 +64,18 @@ float8_skip_list = ["lm_head"]
 USE_TS = True
 
 # OVERFIT TEST
-OVERFIT=False
+OVERFIT=True
+
+def write_loss_to_file(step: int, loss: float, dtype: str):
+    loss_file = Path(f"/home/drisspg/meta/lit-gpt/data/loss_{dtype}_overfit_{OVERFIT}.csv")
+    if not loss_file.exists():
+        with open(loss_file, "w") as f:
+            writer = csv.writer(f)
+            writer.writerow(["step", "loss"])
+    with open(loss_file, "a") as f:
+        writer = csv.writer(f)
+        writer.writerow([step, loss])
+
 
 def get_profile_context(profile: bool, use_fp8: bool):
     def trace_handler(prof):
@@ -195,6 +206,7 @@ def train(
             if not is_accumulating:
                 optimizer.step()
                 optimizer.zero_grad()
+                write_loss_to_file(step_count, loss.item(), "bf16" if not use_fp8 else "fp8")
                 step_count += 1
             dt = time.perf_counter() - t0
             total_lengths += input_ids.size(1)
