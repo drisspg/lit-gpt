@@ -64,7 +64,7 @@ float8_skip_list = ["lm_head"]
 USE_TS = True
 
 # OVERFIT TEST
-OVERFIT=True
+OVERFIT=False
 
 def write_loss_to_file(step: int, loss: float, dtype: str):
     loss_file = Path(f"/home/drisspg/meta/lit-gpt/data/loss_{dtype}_overfit_{OVERFIT}.csv")
@@ -177,6 +177,7 @@ def train(
 
     model.train()
     profile_context = get_profile_context(profile, use_fp8)
+    ix_start = 0
     with profile_context as p:
         for iter_num in range(max_iters):
             # Determine if this is correct location
@@ -191,7 +192,9 @@ def train(
 
             t0 = time.perf_counter()
 
-            input_ids, targets = get_batch(train_data, longest_seq_ix if iter_num == 0 else None)
+            input_ids, targets = get_batch(train_data, longest_seq_ix if iter_num == 0 else None, ix_start)
+            # this is deterministic sampling of the training data
+            ix_start += micro_batch_size
             is_accumulating = (iter_num + 1) % gradient_accumulation_iters != 0
 
             with torch.autocast(device_type='cuda', dtype=torch.bfloat16):
@@ -272,16 +275,19 @@ def validate(model: GPT, val_data: List[Dict], tokenizer: Tokenizer, longest_seq
 def get_nearest_multiple_of_16_less(x):
     return (x // 16) * 16
 
-def get_batch(data: List[Dict], longest_seq_ix: Optional[int] = None
+def get_batch(data: List[Dict], longest_seq_ix: Optional[int] = None, ix_start: Optional[int] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
     # TODO remove when done overfitting experiments
     if OVERFIT:
         ix = torch.arange(0, micro_batch_size)
     else:
-        ix = torch.randint(len(data), (micro_batch_size,))
-        if longest_seq_ix is not None:
-            # force the longest sample at the beginning so potential OOMs happen right away
-            ix[0] = longest_seq_ix
+        if ix_start is not None:
+            ix = torch.arange(ix_start, ix_start + micro_batch_size)
+        else:
+            ix = torch.randint(len(data), (micro_batch_size,))
+            if longest_seq_ix is not None:
+                # force the longest sample at the beginning so potential OOMs happen right away
+                ix[0] = longest_seq_ix
 
     input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
     labels = [data[i]["labels"].type(torch.int64) for i in ix]
