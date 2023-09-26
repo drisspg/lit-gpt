@@ -61,7 +61,10 @@ from float8_experimental.float8_linear_nots import swap_linear_with_float8_linea
 
 # We want to skip the first embedding layer since scaled_mm needs to multiple of 16
 float8_skip_list = ["lm_head"]
-USE_TS = False
+USE_TS = True
+
+# OVERFIT TEST
+OVERFIT=False
 
 def get_profile_context(profile: bool, use_fp8: bool):
     def trace_handler(prof):
@@ -87,7 +90,7 @@ def get_profile_context(profile: bool, use_fp8: bool):
         )
         return context
     else:
-        return nullcontext
+        return nullcontext()
 
 
 def main(
@@ -259,10 +262,14 @@ def get_nearest_multiple_of_16_less(x):
 
 def get_batch(data: List[Dict], longest_seq_ix: Optional[int] = None
 ) -> Tuple[torch.Tensor, torch.Tensor]:
-    ix = torch.randint(len(data), (micro_batch_size,))
-    if longest_seq_ix is not None:
-        # force the longest sample at the beginning so potential OOMs happen right away
-        ix[0] = longest_seq_ix
+    # TODO remove when done overfitting experiments
+    if OVERFIT:
+        ix = torch.arange(0, micro_batch_size)
+    else:
+        ix = torch.randint(len(data), (micro_batch_size,))
+        if longest_seq_ix is not None:
+            # force the longest sample at the beginning so potential OOMs happen right away
+            ix[0] = longest_seq_ix
 
     input_ids = [data[i]["input_ids"].type(torch.int64) for i in ix]
     labels = [data[i]["labels"].type(torch.int64) for i in ix]
