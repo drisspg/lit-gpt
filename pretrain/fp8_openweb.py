@@ -251,6 +251,7 @@ def validate(model: GPT, val_data: DataLoader, loss_file: Path) -> torch.Tensor:
     val_loss = losses.mean()
     model.train()
     write_loss_to_file(loss_file, val_step_count, loss.item())
+    val_step_count += 1
     return val_loss.item()
 
 def load_datasets(data_dir: Path, max_seq_length: int):
