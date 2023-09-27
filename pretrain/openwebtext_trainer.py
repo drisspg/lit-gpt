@@ -21,7 +21,7 @@ from lit_gpt.model import GPT, Block
 from lit_gpt.speed_monitor import SpeedMonitorCallback, estimate_flops, measure_flops
 from lit_gpt.utils import chunked_cross_entropy, get_default_supported_precision, step_csv_logger
 
-model_name = "Llama-2-7b-hf"
+model_name = "pythia-70m"
 name = "openwebtext"
 out_dir = Path("out") / name
 data_dir = Path("data") / name
