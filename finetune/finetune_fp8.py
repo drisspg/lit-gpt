@@ -4,30 +4,34 @@ Instruction-tuning with LoRA on the Alpaca dataset.
 Note: If you run into a CUDA error "Expected is_sm80 to be true, but got false", uncomment the line
 `torch.backends.cuda.enable_flash_sdp(False)` in the script below (see https://github.com/Lightning-AI/lit-llama/issues/101).
 """
-import sys
-from pathlib import Path
+import csv
 import os
+import random
+import sys
 import time
-from typing import Optional, List, Tuple, Dict
+from contextlib import nullcontext
+from pathlib import Path
+from typing import Dict, List, Optional, Tuple
 
 import lightning as L
 import numpy as np
 import torch
 from tqdm import tqdm
-import random
-from contextlib import nullcontext
 
-# support running without installing as a package
-wd = Path(__file__).parent.parent.resolve()
-sys.path.append(str(wd))
-
-
+# Float8 imports
+from float8_experimental.float8_linear import (
+    swap_linear_with_float8_linear, sync_float8_amax_and_scale_history)
+from float8_experimental.float8_linear_nots import \
+    swap_linear_with_float8_linear_nots
 from generate.base import generate
 from lit_gpt.model import GPT, Config
 from lit_gpt.tokenizer import Tokenizer
 from lit_gpt.utils import chunked_cross_entropy
 from scripts.prepare_alpaca import generate_prompt
-import csv
+
+# support running without installing as a package
+wd = Path(__file__).parent.parent.resolve()
+sys.path.append(str(wd))
 
 
 instruction_tuning = True
@@ -46,18 +50,12 @@ gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
 max_iters = 50000  # train dataset size
 weight_decay = 0.01
-lora_r = 8
-lora_alpha = 16
-lora_dropout = 0.05
 warmup_steps = 100
 
 hparams = {k: v for k, v in locals().items() if isinstance(v, (int, float, str)) and not k.startswith("_")}
 
 device = torch.device("cuda")
 
-# Float8 imports
-from float8_experimental.float8_linear import swap_linear_with_float8_linear, sync_float8_amax_and_scale_history
-from float8_experimental.float8_linear_nots import swap_linear_with_float8_linear_nots
 
 # We want to skip the first embedding layer since scaled_mm needs to multiple of 16
 float8_skip_list = ["lm_head"]
