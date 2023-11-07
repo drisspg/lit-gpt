@@ -12,8 +12,8 @@ import sys
 import time
 from contextlib import nullcontext
 from pathlib import Path
+from typing import Optional
 
-import lightning as L
 import numpy as np
 import torch
 from torch.utils.data import DataLoader, IterableDataset
@@ -27,23 +27,35 @@ from lit_gpt.model import GPT, Config
 from lit_gpt.utils import chunked_cross_entropy
 
 # Float8 imports
-from float8_experimental.float8_linear import (
-    swap_linear_with_float8_linear, sync_float8_amax_and_scale_history)
-from float8_experimental.float8_linear_nots import \
-    swap_linear_with_float8_linear_nots
+from float8_experimental.float8_linear import sync_float8_amax_and_scale_history
 
+from float8_experimental.float8_linear_utils import get_float8_linear, linear_requires_sync, LinearType, swap_linear_with_float8_linear
+
+
+from float8_experimental.dynamic_linear import Float8DynamicLinear
+from float8_experimental.float8_linear import Float8Linear
+from float8_experimental.float8_linear_nots import Float8LinearNoTensorSubclass
+
+LINEAR_TYPE_MAP = {
+    LinearType.DELAYED: Float8Linear,
+    LinearType.DYNAMIC: Float8DynamicLinear,
+    LinearType.NO_SUBCLASS: Float8LinearNoTensorSubclass,
+}
 
 instruction_tuning = True
-eval_interval = 25
+eval_interval = 500
 save_interval = 10000
 eval_iters = 100
-log_interval = 1
+log_interval = 2
 # change this value to force a maximum sequence length
 override_max_seq_length = None
 
+OVERFIT=False
+COMPILE=False
+
 # Hyperparameters
 learning_rate = 6e-4
-batch_size = 128
+batch_size = 128 if not OVERFIT else 1
 micro_batch_size = 1
 gradient_accumulation_iters = batch_size // micro_batch_size
 assert gradient_accumulation_iters > 0
@@ -68,10 +80,6 @@ val_step_count=0
 
 # We want to skip the first embedding layer since scaled_mm needs to multiple of 16
 float8_skip_list = ["lm_head"]
-USE_TS = True
-
-# OVERFIT TEST
-OVERFIT=False
 
 
 def write_loss_to_file(loss_file: Path, step: int, loss: float):
@@ -84,10 +92,9 @@ def write_loss_to_file(loss_file: Path, step: int, loss: float):
         writer.writerow([step, loss])
 
 
-def get_profile_context(profile: bool, use_fp8: bool):
+def get_profile_context(profile: bool, fp8_linear_type: LinearType):
     def trace_handler(prof):
-        fp8_str = "fp8_TS" if USE_TS else "fp8_NoTS"
-        dtype_str = fp8_str if use_fp8 else "bf16"
+        dtype_str = fp8_linear_type if fp8_linear_type else "bf16"
         output_str = f"/tmp/trace_llama_7b_hf_{dtype_str}.json"
         prof.export_chrome_trace(output_str)
         print(f"Wrote profile to: {output_str}")
@@ -113,8 +120,9 @@ def get_profile_context(profile: bool, use_fp8: bool):
 
 def main(
     compile: bool = False,
-    use_fp8: bool = False,
-    profile: bool = False, # this will profile iterations 100-105
+    fp8_linear_type: Optional[str] = None,
+    profile: bool = False, # this will profile iterations 100-102
+    log_dir: Path = Path("/home/drisspg/meta/lit-gpt/data"),
 ):
     random.seed(1337)
     np.random.seed(1337)
@@ -135,11 +143,11 @@ def main(
     train_dataloader = DataLoader(train_data, batch_size=micro_batch_size, num_workers=2)
     val_dataloader = DataLoader(val_data, batch_size=micro_batch_size, num_workers=2)
 
-    if use_fp8:
-        if USE_TS:
-            swap_linear_with_float8_linear(model)
-        else:
-            swap_linear_with_float8_linear_nots(model)
+    if fp8_linear_type is not None:
+        fp8_linear_type = LinearType[fp8_linear_type.upper()]
+    if fp8_linear_type is not None:
+        fp8_module = LINEAR_TYPE_MAP[fp8_linear_type]
+        swap_linear_with_float8_linear(model, fp8_module)
 
     trainable_params = [p for p in model.parameters() if p.requires_grad]
     num_trainable = sum(p.numel() for p in trainable_params)
@@ -148,10 +156,12 @@ def main(
     optimizer = torch.optim.AdamW(
         model.parameters(), lr=learning_rate, weight_decay=weight_decay, betas=(beta1, beta2), foreach=False
     )
+    global COMPILE
+    COMPILE=compile
     if compile:
         model = torch.compile(model)
 
-    train(model, optimizer, train_dataloader, val_dataloader, out_dir, use_fp8, profile)
+    train(model, optimizer, train_dataloader, val_dataloader, out_dir, fp8_linear_type, profile, log_dir)
 
     # Save the final LoRA checkpoint at the end of training
     save_path = out_dir / "lit_model_full_finetuned.pth"
@@ -163,8 +173,9 @@ def train(
     train_data: DataLoader,
     val_data: DataLoader,
     out_dir: str,
-    use_fp8: bool,
+    fp8_linear_type: Optional[LinearType],
     profile: bool,
+    log_dir: Path
 ) -> None:
     """The training loop.
 
@@ -175,23 +186,27 @@ def train(
     progress_bar = tqdm(total=max_iters)
 
     model.train()
-    profile_context = get_profile_context(profile, use_fp8)
+    profile_context = get_profile_context(profile, fp8_linear_type)
     train_iter = iter(train_data)
 
+    global COMPILE
     # Sanity check
-    fp8_str = "fp8_TS" if USE_TS else "fp8_NoTS"
-    dtype_str = fp8_str if use_fp8 else "bf16"
-    val_loss_file = Path(f"/home/drisspg/meta/lit-gpt/data/pretrain_validation_loss_{dtype_str}_overfit_{OVERFIT}.csv")
-    train_loss_file = Path(f"/home/drisspg/meta/lit-gpt/data/pretrain_train_loss_{dtype_str}_overfit_{OVERFIT}.csv")
-    validate(model, val_data, train_loss_file)
+    dtype_str = fp8_linear_type if fp8_linear_type else "bf16"
+    val_loss_file = log_dir / f"pretrain_validation_loss_{dtype_str}_overfit_{OVERFIT}_compile_{COMPILE}.csv"
+    val_loss_file =log_dir / f"pretrain_validation_loss_{dtype_str}_overfit_{OVERFIT}_compile_{COMPILE}.csv"
+    train_loss_file = log_dir / f"pretrain_train_loss_{dtype_str}_overfit_{OVERFIT}_compile_{COMPILE}.csv"
+    print(f"val_loss_file: {val_loss_file}")
+    print(f"train_loss_file: {train_loss_file}")
+    # validate(model, val_data, train_loss_file)
+    sync_func = torch.compile(sync_float8_amax_and_scale_history) if COMPILE else sync_float8_amax_and_scale_history
     with profile_context as p:
         for iter_num in range(max_iters):
             lr = get_lr(iter_num) if decay_lr else learning_rate
             for param_group in optimizer.param_groups:
                 param_group["lr"] = lr
             # Determine if this is correct location
-            if use_fp8:
-                sync_float8_amax_and_scale_history(model)
+            if linear_requires_sync(fp8_linear_type):
+                sync_func(model)
 
             t0 = time.perf_counter()
 
@@ -210,7 +225,6 @@ def train(
             if not is_accumulating:
                 optimizer.step()
                 optimizer.zero_grad()
-                write_loss_to_file(train_loss_file, step_count, loss.item())
                 step_count += 1
 
             dt = time.perf_counter() - t0
@@ -227,6 +241,7 @@ def train(
                 torch.save(checkpoint_path, {"model": model})
 
             if iter_num % log_interval == 0:
+                write_loss_to_file(train_loss_file, step_count, loss.item())
                 progress_bar.set_postfix_str(f"Iter {iter_num}: Loss {loss.item():.4f}, Time: {dt*1000:.2f}ms")
             progress_bar.update(1)
             if profile:
@@ -246,7 +261,7 @@ def validate(model: GPT, val_data: DataLoader, loss_file: Path) -> torch.Tensor:
         targets = targets.pin_memory().to(device)
         logits = model(input_ids)
         loss = chunked_cross_entropy(logits, targets, chunk_size=0)
-        losses[k] = loss.item()
+        losses[k] = loss
 
     val_loss = losses.mean()
     model.train()
@@ -269,7 +284,10 @@ class Dataset(IterableDataset):
     def __iter__(self):
         data = np.memmap(self.data_file, dtype=np.uint16, mode="r")
         while True:
-            i = torch.randint(len(data) - self.max_seq_length, (1,)).item()
+            if OVERFIT:
+                i = 0
+            else:
+                i = torch.randint(len(data) - self.max_seq_length, (1,)).item()
             x = torch.from_numpy((data[i : i + self.max_seq_length]).astype(np.int64))
             y = torch.from_numpy((data[i + 1 : i + 1 + self.max_seq_length]).astype(np.int64))
             yield x, y
@@ -291,10 +309,9 @@ def get_lr(it):
 
 
 if __name__ == "__main__":
-    # Uncomment this line if you see an error: "Expected is_sm80 to be true, but got false"
-    # torch.backends.cuda.enable_flash_sdp(False)
     torch.set_float32_matmul_precision("high")
 
     from jsonargparse import CLI
-
+    # Example usage:
+    # python pretrain/fp8_openweb.py --fp8_linear_type "dynamic" --compile True
     CLI(main)
