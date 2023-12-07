@@ -27,26 +27,22 @@ from lit_gpt.model import GPT, Config
 from lit_gpt.utils import chunked_cross_entropy
 
 # Float8 imports
-from float8_experimental.float8_linear import sync_float8_amax_and_scale_history
-
-from float8_experimental.float8_linear_utils import get_float8_linear, linear_requires_sync, LinearType, swap_linear_with_float8_linear
+from float8_experimental.float8_linear_utils import linear_requires_sync, LinearType, swap_linear_with_float8_linear, sync_float8_amax_and_scale_history
 
 
 from float8_experimental.dynamic_linear import Float8DynamicLinear
 from float8_experimental.float8_linear import Float8Linear
-from float8_experimental.float8_linear_nots import Float8LinearNoTensorSubclass
 
 LINEAR_TYPE_MAP = {
     LinearType.DELAYED: Float8Linear,
     LinearType.DYNAMIC: Float8DynamicLinear,
-    LinearType.NO_SUBCLASS: Float8LinearNoTensorSubclass,
 }
 
 instruction_tuning = True
 eval_interval = 500
 save_interval = 10000
 eval_iters = 100
-log_interval = 2
+log_interval = 500
 # change this value to force a maximum sequence length
 override_max_seq_length = None
 
@@ -198,7 +194,8 @@ def train(
     print(f"val_loss_file: {val_loss_file}")
     print(f"train_loss_file: {train_loss_file}")
     # validate(model, val_data, train_loss_file)
-    sync_func = torch.compile(sync_float8_amax_and_scale_history) if COMPILE else sync_float8_amax_and_scale_history
+    # sync_func = torch.compile(sync_float8_amax_and_scale_history) if COMPILE else sync_float8_amax_and_scale_history
+    sync_func = sync_float8_amax_and_scale_history
     with profile_context as p:
         for iter_num in range(max_iters):
             lr = get_lr(iter_num) if decay_lr else learning_rate
